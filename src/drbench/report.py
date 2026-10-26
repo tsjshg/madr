@@ -26,22 +26,21 @@ MARKERS = ["o", "^", "s", "D"]
 TEXT, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 # Colour follows the method, never its rank: known methods get fixed slots.
 METHOD_SLOTS = {"pca": 0, "tsne": 1, "umap": 2, "densmap": 3, "pacmap": 4, "mds": 5, "trimap": 6}
+VARIANT_DASHES = ["-", (0, (5, 2)), (0, (1, 1.5)), (0, (5, 2, 1, 2))]
 REFERENCE_STYLE = {"color": "#9a9893", "linestyle": "--"}  # the random layout
 SEQUENTIAL = LinearSegmentedColormap.from_list("blue", ["#cde2fb", "#6da7ec", "#256abf", "#0d366b"])
 
 
 def _method_style(spec: str, extra: dict[str, int]) -> dict:
+    """Colour follows the method family; variants of one family differ by dash."""
     base = spec.split(":")[0]
     if base == "random":
         return dict(REFERENCE_STYLE)
-    if spec in extra:
-        slot = extra[spec]
-    elif base in METHOD_SLOTS and spec == base:
-        slot = METHOD_SLOTS[base]
-    else:  # variants and new methods take the remaining slots in order
-        slot = 7 + len(extra)
-        extra[spec] = slot
-    return {"color": SLOTS[slot % len(SLOTS)], "linestyle": "-" if slot < len(SLOTS) else ":"}
+    slot = METHOD_SLOTS.get(base, 7)  # slot 7 (red) is reserved for the new method
+    if spec == base:
+        return {"color": SLOTS[slot], "linestyle": "-"}
+    variant = extra.setdefault(spec, sum(1 for s in extra if s.split(":")[0] == base))
+    return {"color": SLOTS[slot], "linestyle": VARIANT_DASHES[variant % len(VARIANT_DASHES)]}
 
 
 def _style_axes(ax):
@@ -117,6 +116,43 @@ def plot_scatter(dataset: str, specs: list[str], out: Path, seed: int = 0, max_n
     plt.close(fig)
 
 
+def plot_tradeoff(out: Path, local: str = "rnx@10", global_: str = "dist_spearman") -> None:
+    """Local vs global quality per dataset; variants of one method are joined by a line."""
+    table = summarize(load_results()).reset_index()
+    table = table[table.method != "random"]
+    names = list(dict.fromkeys(table.dataset))
+    ncol = min(4, len(names))
+    nrow = int(np.ceil(len(names) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.3 * ncol, 3.1 * nrow), dpi=150, squeeze=False)
+    for ax, name in zip(axes.flat, names):
+        sub = table[table.dataset == name]
+        families: dict[str, list] = {}
+        for _, r in sub.iterrows():
+            families.setdefault(r.method.split(":")[0], []).append(r)
+        for base, rows in families.items():
+            color = SLOTS[METHOD_SLOTS.get(base, 7)]
+            xs = [r[global_] for r in rows]
+            ys = [r[local] for r in rows]
+            if len(rows) > 1:
+                ax.plot(xs, ys, color=color, linewidth=2, zorder=2)
+            ax.scatter(xs, ys, s=36, color=color, edgecolors="white", linewidths=1.5, zorder=3)
+            for r, x, y in zip(rows, xs, ys):
+                label = r.method.split(":", 1)[1] if ":" in r.method else r.method
+                label = label.replace("gamma=", "γ=")
+                ax.annotate(label, (x, y), xytext=(4, 3), textcoords="offset points", fontsize=6.5, color=MUTED)
+        ax.set_title(name, color=TEXT, fontsize=9, loc="left")
+        ax.set_xlabel(f"global: {global_}", color=MUTED, fontsize=7.5)
+        ax.set_ylabel(f"local: {local}", color=MUTED, fontsize=7.5)
+        _style_axes(ax)
+    for ax in list(axes.flat)[len(names):]:
+        ax.axis("off")
+    fig.suptitle("Local vs global trade-off (up-right is better; mean over seeds)", color=TEXT,
+                 fontsize=10, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out)
+    plt.close(fig)
+
+
 def write_summary(out: Path) -> None:
     df = load_results()
     table = summarize(df)
@@ -157,5 +193,6 @@ def build(specs: list[str] | None = None, max_n: int | None = None) -> Path:
         ds_specs = specs or list(dict.fromkeys(df[df.dataset == dataset].method))
         plot_rnx(dataset, ds_specs, out / f"rnx_{dataset}.png")
         plot_scatter(dataset, ds_specs, out / f"scatter_{dataset}.png", max_n=max_n)
+    plot_tradeoff(out / "tradeoff.png")
     write_summary(out / "summary.md")
     return out

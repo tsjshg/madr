@@ -119,3 +119,11 @@ def trimap_(X, seed=0, n_inliers=12, **kw):
     np.random.seed(seed)
     model = trimap.TRIMAP(n_dims=2, n_inliers=n_inliers, knn_tuple=(nbrs, dist), **kw)
     return model.fit_transform(X)
+
+
+@register("scalerank")
+def scalerank(X, seed=0, **kw):
+    """Prototype of direction A (docs/scalerank.md); e.g. ``scalerank:gamma=0.5``."""
+    from .proto.scalerank import ScaleRank
+
+    return ScaleRank(random_state=seed, **kw).fit_transform(X)

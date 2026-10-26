@@ -26,7 +26,8 @@ uv run pytest
 | `src/drbench/datasets.py` | データセット登録。`X` は「手法の入力」かつ「指標の基準空間」 |
 | `src/drbench/methods.py` | 手法登録。`@register("name")` で `fn(X, seed, **params) -> (N,2)` を足すだけ |
 | `src/drbench/runner.py` | グリッド実行・キャッシュ・集計 |
-| `src/drbench/report.py` | R_NX(K) 曲線、散布図、summary.md |
+| `src/drbench/report.py` | R_NX(K) 曲線、散布図、局所×大域のトレードオフ図、summary.md |
+| `src/drbench/proto/scalerank.py` | 方向性Aの試作 ScaleRank（`scalerank:gamma=…`）。定式化は [docs/scalerank.md](docs/scalerank.md) |
 
 ## 指標
 
