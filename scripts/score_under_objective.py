@@ -11,6 +11,7 @@ each embedding is standardised and the best global scale factor is searched.
 
     uv run drbench run -d digits             # embeddings must be cached first
     uv run python scripts/score_under_objective.py digits --gammas 1 0
+    uv run python scripts/score_under_objective.py hier_blobs --k0 10 --width 0.7   # band profile
 """
 
 import argparse
@@ -34,6 +35,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dataset")
     ap.add_argument("--gammas", nargs="+", type=float, default=[1.0, 0.0])
+    ap.add_argument("--k0", type=float, default=None, help="use a log-normal band around k0 instead of K^-gamma")
+    ap.add_argument("--width", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0, help="which cached embeddings to score")
     ap.add_argument("--per-point", type=int, default=200, help="triplets per point for the estimate")
     args = ap.parse_args()
@@ -46,10 +49,12 @@ def main():
     scales = np.geomspace(0.1, 1000, 50)
     rng = np.random.default_rng(123)
 
-    for gamma in args.gammas:
-        p = scale_profile(ds.n, gamma)
-        triplets = sample_triplets(order, p, args.per_point, rng)  # uniform negatives: the plain objective
-        print(f"\n{ds.name}  gamma={gamma}  (ScaleRank loss, lower is better)")
+    profiles = [(f"k0={args.k0},width={args.width}", dict(k0=args.k0, width=args.width))] if args.k0 else \
+        [(f"gamma={g}", dict(gamma=g)) for g in args.gammas]
+    for label, kw in profiles:
+        p = scale_profile(ds.n, **kw)
+        triplets = sample_triplets(order, p, args.per_point, rng)[:3]  # uniform negatives: the plain objective
+        print(f"\n{ds.name}  {label}  (ScaleRank loss, lower is better)")
         print(f"  {'method':26s} {'loss':>7s} {'scale':>7s} {'rnx@10':>7s} {'auc':>6s}")
         rows = []
         for spec in specs:

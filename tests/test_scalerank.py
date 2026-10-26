@@ -29,7 +29,9 @@ def test_triplets_respect_ranks():
     p = scale_profile(80, gamma=0.5)
     low_nbrs = np.argsort(cdist(X[:, :2], X[:, :2]), axis=1)[:, 1:31]  # any low-dim layout
     for hard in (0.0, 1.0):
-        i, j, m = sample_triplets(order, p, 50, rng, rank, low_nbrs, hard)
+        i, j, m, w, is_hard = sample_triplets(order, p, 50, rng, rank, low_nbrs, hard, hard_c=1.0)
+        assert is_hard.any() == (hard > 0)
+        assert ((w > 0) & (w <= 1)).all()
         assert (j != i).all() and (m != i).all()
         assert (rank[i, j] < rank[i, m]).all()
 
@@ -58,3 +60,26 @@ def test_recovers_a_2d_layout():
     X = np.random.default_rng(2).uniform(size=(300, 2))
     Y = ScaleRank(gamma=1.0, init="random", n_epochs=300, random_state=0).fit_transform(X)
     assert rank_metrics(X, Y).r_nx[10] > 0.8
+
+
+def test_local_scaling_rank_tables_are_permutations():
+    X = np.random.default_rng(3).normal(size=(60, 20))
+    order, rank = neighbour_order(X, local_scaling=5)
+    for a in range(60):
+        assert sorted(order[a]) == sorted(set(range(60)) - {a})
+        assert (rank[a, order[a]] == np.arange(1, 60)).all()
+
+
+def test_frozen_out_neighbours_receive_no_gradient():
+    rng = np.random.default_rng(4)
+    Y = rng.normal(size=(10, 2))
+    i, j, m = np.array([0, 1]), np.array([2, 3]), np.array([4, 5])
+    _, G = triplet_loss_and_grad(Y, i, j, m, freeze_m=np.array([True, False]))
+    assert np.allclose(G[4], 0) and not np.allclose(G[5], 0)
+
+
+@pytest.mark.parametrize("kw", [dict(local_scaling=10, local_scaling_kmax=30), dict(hard_one_sided=True, hard_c=1.0)])
+def test_options_run(kw):
+    X = np.random.default_rng(5).normal(size=(150, 8))
+    Y = ScaleRank(n_epochs=20, random_state=0, **kw).fit_transform(X)
+    assert Y.shape == (150, 2) and np.isfinite(Y).all()
