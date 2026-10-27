@@ -92,3 +92,27 @@ def test_evaluate_outputs(data):
     scalars, arrays = evaluate(X, Y, labels)
     assert {"auc_rnx", "trust@10", "knn_acc", "density_corr", "dist_spearman"} <= scalars.keys()
     assert arrays["overlap@10"].shape == (60,)
+
+
+def test_anchor_rows_estimate_the_full_metrics(data):
+    X, Y = data
+    full = rank_metrics(X, Y)
+    # all rows as anchors reproduces the exact values
+    same = rank_metrics(X, Y, anchors=np.arange(60))
+    assert np.allclose(same.r_nx, full.r_nx) and same.footrule == pytest.approx(full.footrule)
+    # averaging the estimate over a partition of the rows gives the exact value back
+    parts = np.array_split(np.random.default_rng(0).permutation(60), 3)
+    est = [rank_metrics(X, Y, anchors=np.sort(a)) for a in parts]
+    w = [len(a) / 60 for a in parts]
+    assert np.allclose(sum(wi * e.q_nx for wi, e in zip(w, est)), full.q_nx)
+    assert sum(wi * e.trustworthiness[10] for wi, e in zip(w, est)) == pytest.approx(full.trustworthiness[10])
+
+
+def test_knn_overlap_matches_rank_overlap(data):
+    from drbench.metrics import knn_overlap
+
+    X, Y = data
+    full = rank_metrics(X, Y, ks=(5, 10))
+    ko = knn_overlap(X, Y, ks=(5, 10))
+    for k in (5, 10):
+        assert np.allclose(ko[k], full.pointwise_overlap[k])

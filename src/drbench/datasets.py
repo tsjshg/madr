@@ -211,12 +211,13 @@ def buettner() -> Dataset:
 # ---------------------------------------------------------------- OpenML
 
 
-def _openml(name: str, openml_name: str, description: str, n: int = 10_000) -> Dataset:
-    """Fetch from OpenML (network on first use) and keep a fixed 10k subset."""
-    cache = DATA_DIR / "openml" / f"{name}_{n}.npz"
+def _openml(name: str, openml_name: str, description: str, n: int | None = 10_000) -> Dataset:
+    """Fetch from OpenML (network on first use) and keep a fixed subset of n points (all if None)."""
+    cache = DATA_DIR / "openml" / f"{name}_{n or 'all'}.npz"
     if not cache.exists():
-        d = skd.fetch_openml(openml_name, version=1, as_frame=False, data_home=DATA_DIR / "openml")
-        idx = np.sort(np.random.default_rng(0).choice(len(d.target), n, replace=False))
+        # parser="pandas" fails with the installed pandas (rename_categories gets ints)
+        d = skd.fetch_openml(openml_name, version=1, as_frame=False, parser="liac-arff", data_home=DATA_DIR / "openml")
+        idx = np.arange(len(d.target)) if n is None else np.sort(np.random.default_rng(0).choice(len(d.target), n, replace=False))
         X = d.data[idx].astype(np.float32) / 255.0
         y = d.target[idx].astype(int)
         X50 = PCA(n_components=50, random_state=0).fit_transform(X)
@@ -233,3 +234,13 @@ def mnist10k() -> Dataset:
 @register("fmnist10k")
 def fmnist10k() -> Dataset:
     return _openml("fmnist10k", "Fashion-MNIST", "Fashion-MNIST, 10k random subset, PCA-50")
+
+
+@register("mnist70k")
+def mnist70k() -> Dataset:
+    return _openml("mnist70k", "mnist_784", "MNIST, all 70k, PCA-50", n=None)
+
+
+@register("fmnist70k")
+def fmnist70k() -> Dataset:
+    return _openml("fmnist70k", "Fashion-MNIST", "Fashion-MNIST, all 70k, PCA-50", n=None)

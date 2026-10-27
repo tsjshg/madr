@@ -127,3 +127,11 @@ def scalerank(X, seed=0, **kw):
     from .proto.scalerank import ScaleRank
 
     return ScaleRank(random_state=seed, **kw).fit_transform(X)
+
+
+@register("scalerank_fast")
+def scalerank_fast(X, seed=0, **kw):
+    """ScaleRank without N x N rank tables (kNN + multi-scale pool + fresh candidates)."""
+    from .proto.scalerank_fast import ScaleRankFast
+
+    return ScaleRankFast(random_state=seed, **kw).fit_transform(X)

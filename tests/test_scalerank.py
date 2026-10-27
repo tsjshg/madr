@@ -152,3 +152,24 @@ def test_groups_respect_ranks():
 def test_hard_c_requires_triplets():
     with pytest.raises(ValueError):
         ScaleRank(n_neg=20, hard_c=1.0)
+
+
+def test_weighted_negatives_gradient_matches_finite_differences():
+    from drbench.proto.scalerank import softmax_loss_and_grad
+
+    rng = np.random.default_rng(9)
+    Y = rng.normal(size=(12, 2))
+    i = np.array([0, 1, 2, 3, 0])
+    j = np.array([4, 5, 6, 7, 8])
+    M = rng.integers(0, 12, size=(5, 6))
+    w = rng.uniform(1, 50, 5)
+    _, G = softmax_loss_and_grad(Y, i, j, M, neg_w=w)
+    eps = 1e-6
+    num = np.zeros_like(Y)
+    for a in range(12):
+        for c in range(2):
+            Yp, Ym = Y.copy(), Y.copy()
+            Yp[a, c] += eps
+            Ym[a, c] -= eps
+            num[a, c] = (softmax_loss_and_grad(Yp, i, j, M, neg_w=w)[0] - softmax_loss_and_grad(Ym, i, j, M, neg_w=w)[0]) / (2 * eps)
+    assert np.allclose(G / len(i), num, atol=1e-6)

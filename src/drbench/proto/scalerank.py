@@ -185,25 +185,29 @@ def sample_groups(
     return i, j, M, is_hard
 
 
-def softmax_loss_and_grad(Y: np.ndarray, i, j, M, freeze_m=None) -> tuple[float, np.ndarray]:
+def softmax_loss_and_grad(Y: np.ndarray, i, j, M, freeze_m=None, freeze_j=None, neg_w=None) -> tuple[float, np.ndarray]:
     """InfoNCE-style loss: -log(q_ij / (q_ij + sum_m q_im)), q = 1 / (1 + d^2).
 
     With one negative per group this is exactly the triplet loss.  With many,
     each negative's push is weighted by its share q_im / Z of the softmax, so
     negatives that currently sit close to i dominate: a smooth version of
     hard-negative sampling.  Returns the mean loss and the gradient w.r.t. Y
-    summed per point.
+    summed per point.  ``freeze_m`` (per negative) and ``freeze_j`` (per
+    group) stop the gradient on that partner, so only the anchor moves.
+    ``neg_w`` (per group) multiplies the negatives' sum in Z, e.g. by
+    (N - 1 - K) / Q so that it estimates the sum over the whole complement.
     """
     dij = Y[i] - Y[j]  # (n, d)
     dim = Y[i][:, None, :] - Y[M]  # (n, Q, d)
     qij = 1.0 / (1.0 + (dij**2).sum(axis=1))  # (n,)
     qim = 1.0 / (1.0 + (dim**2).sum(axis=2))  # (n, Q)
-    Z = qij + qim.sum(axis=1)
+    w = 1.0 if neg_w is None else np.asarray(neg_w)[:, None]
+    Z = qij + (w * qim).sum(axis=1)
     loss = np.log(Z) - np.log(qij)
-    # d loss / d log q_ij = -(1 - q_ij / Z);  d loss / d log q_im = q_im / Z
+    # d loss / d log q_ij = -(1 - q_ij / Z);  d loss / d log q_im = w q_im / Z
     # d log q / d y_i = -2 (y_i - y_other) q
     gij = (2 * (1 - qij / Z) * qij)[:, None] * dij  # d loss / d y_i through d_ij
-    gim = (-2 * (qim / Z[:, None]) * qim)[:, :, None] * dim  # d loss / d y_i through each d_im
+    gim = (-2 * (w * qim / Z[:, None]) * qim)[:, :, None] * dim  # d loss / d y_i through each d_im
     if freeze_m is not None:
         gim_m = np.where(freeze_m[:, :, None], 0.0, gim)
     else:
@@ -214,7 +218,7 @@ def softmax_loss_and_grad(Y: np.ndarray, i, j, M, freeze_m=None) -> tuple[float,
     for c in range(dim_out):
         G[:, c] = (
             np.bincount(i, weights=gij[:, c] + gim[:, :, c].sum(axis=1), minlength=n)
-            - np.bincount(j, weights=gij[:, c], minlength=n)
+            - np.bincount(j, weights=gij[:, c] if freeze_j is None else np.where(freeze_j, 0.0, gij[:, c]), minlength=n)
             - np.bincount(Mf, weights=gim_m[:, :, c].ravel(), minlength=n)
         )
     return float(loss.mean()), G

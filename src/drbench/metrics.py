@@ -6,6 +6,11 @@ log-K weighted AUC of R_NX.  Ranks are computed row by row in chunks so the
 N x N co-ranking matrix is never materialised: every quantity we need can be
 accumulated from per-row rank vectors.
 
+Above ``EXACT_MAX_N`` points :func:`evaluate` uses only a random subset of
+rows (anchors).  Every rank metric is a mean over rows, so the subset gives
+an unbiased estimate at O(anchors x N) cost; per-point overlap@K is then
+computed for all points from kNN lists instead.
+
 Conventions
 -----------
 - rank_h[i, j] / rank_l[i, j]: rank of j among the neighbours of i in the
@@ -26,6 +31,8 @@ from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
 
 DEFAULT_KS = (5, 10, 30, 100)
 _CHUNK_ELEMS = 4_000_000  # rows * N per chunk; bounds memory to ~100 MB
+EXACT_MAX_N = 10_000  # above this, evaluate() samples anchor rows
+N_ANCHORS = 2_000
 
 
 def _row_ranks(D: np.ndarray, rows: np.ndarray) -> np.ndarray:
@@ -38,13 +45,14 @@ def _row_ranks(D: np.ndarray, rows: np.ndarray) -> np.ndarray:
     return ranks
 
 
-def iter_rank_chunks(X: np.ndarray, Y: np.ndarray, chunk_rows: int | None = None):
-    """Yield (rows, rank_h, rank_l) blocks covering all rows."""
+def iter_rank_chunks(X: np.ndarray, Y: np.ndarray, chunk_rows: int | None = None, anchors=None):
+    """Yield (rows, rank_h, rank_l) blocks covering all rows (or just ``anchors``)."""
     n = X.shape[0]
+    anchors = np.arange(n) if anchors is None else np.asarray(anchors)
     if chunk_rows is None:
         chunk_rows = max(1, _CHUNK_ELEMS // n)
-    for start in range(0, n, chunk_rows):
-        rows = np.arange(start, min(start + chunk_rows, n))
+    for start in range(0, len(anchors), chunk_rows):
+        rows = anchors[start : start + chunk_rows]
         rh = _row_ranks(cdist(X[rows], X), rows)
         rl = _row_ranks(cdist(Y[rows], Y), rows)
         yield rows, rh, rl
@@ -60,27 +68,33 @@ class RankMetrics:
     continuity: dict[int, float]
     qscore_legacy: float  # sum_ij |rank_h - rank_l| / N  (the 2022 "Qスコア")
     footrule: float  # mean |rank_h - rank_l| / (N-1); ~1/3 for a random layout
-    pointwise_overlap: dict[int, np.ndarray] = field(repr=False)
+    pointwise_overlap: dict[int, np.ndarray] = field(repr=False)  # NaN off the anchors
+    n_anchors: int = 0  # rows the estimates are based on (N when exact)
 
 
 def rank_metrics(
-    X: np.ndarray, Y: np.ndarray, ks=DEFAULT_KS, chunk_rows: int | None = None
+    X: np.ndarray, Y: np.ndarray, ks=DEFAULT_KS, chunk_rows: int | None = None, anchors=None
 ) -> RankMetrics:
-    """All co-ranking based metrics in a single pass over the data."""
+    """All co-ranking based metrics in a single pass over the data.
+
+    With ``anchors`` (row indices) only those rows of the co-ranking
+    matrix are used and every metric is the corresponding row-mean estimate.
+    """
     X = np.asarray(X, dtype=np.float64)
     Y = np.asarray(Y, dtype=np.float64)
     n = X.shape[0]
     if Y.shape[0] != n:
         raise ValueError(f"inconsistent sizes: high={n} low={Y.shape[0]}")
     ks = [k for k in ks if 1 <= k < n / 2]
+    s = n if anchors is None else len(anchors)
 
     max_rank_counts = np.zeros(n, dtype=np.int64)
     trust_pen = {k: 0.0 for k in ks}
     cont_pen = {k: 0.0 for k in ks}
-    overlap = {k: np.zeros(n) for k in ks}
+    overlap = {k: np.zeros(n) if anchors is None else np.full(n, np.nan) for k in ks}
     abs_diff_sum = 0.0
 
-    for rows, rh, rl in iter_rank_chunks(X, Y, chunk_rows):
+    for rows, rh, rl in iter_rank_chunks(X, Y, chunk_rows, anchors):
         m = np.maximum(rh, rl)
         max_rank_counts += np.bincount(m.ravel(), minlength=n)
         abs_diff_sum += np.abs(rh.astype(np.int64) - rl).sum()
@@ -95,16 +109,17 @@ def rank_metrics(
 
     # Q_NX(K) = |{(i,j): rank_h <= K and rank_l <= K}| / (K N); the self pair
     # has max rank 0 and is dropped by starting the cumulative sum at index 1.
+    # With anchors, N rows become s rows.
     cum = np.cumsum(max_rank_counts[1:])  # cum[K-1] = #pairs with max rank <= K
     ks_all = np.arange(1, n - 1)
     q_nx = np.zeros(n - 1)
-    q_nx[1:] = cum[: n - 2] / (ks_all * n)
+    q_nx[1:] = cum[: n - 2] / (ks_all * s)
     r_nx = np.zeros(n - 1)
     r_nx[1:] = ((n - 1) * q_nx[1:] - ks_all) / (n - 1 - ks_all)
     auc = float(np.sum(r_nx[1:] / ks_all) / np.sum(1.0 / ks_all))
 
     def _norm(k):
-        return 2.0 / (n * k * (2 * n - 3 * k - 1))
+        return 2.0 / (s * k * (2 * n - 3 * k - 1))
 
     return RankMetrics(
         n=n,
@@ -113,10 +128,32 @@ def rank_metrics(
         auc_r_nx=auc,
         trustworthiness={k: 1.0 - _norm(k) * trust_pen[k] for k in ks},
         continuity={k: 1.0 - _norm(k) * cont_pen[k] for k in ks},
-        qscore_legacy=abs_diff_sum / n,
-        footrule=abs_diff_sum / (n * (n - 1) * (n - 1)),
+        qscore_legacy=abs_diff_sum / s,
+        footrule=abs_diff_sum / (s * (n - 1) * (n - 1)),
         pointwise_overlap=overlap,
+        n_anchors=s,
     )
+
+
+def knn_overlap(X: np.ndarray, Y: np.ndarray, ks=DEFAULT_KS) -> dict[int, np.ndarray]:
+    """Per-point |kNN_X(i) & kNN_Y(i)| / k for every point, from kNN lists.
+
+    Same quantity as ``RankMetrics.pointwise_overlap`` (up to distance ties)
+    without the O(N^2) rank tables.
+    """
+    kmax = max(ks)
+    nx = NearestNeighbors(n_neighbors=kmax + 1).fit(X).kneighbors(X, return_distance=False)[:, 1:]
+    ny = NearestNeighbors(n_neighbors=kmax + 1).fit(Y).kneighbors(Y, return_distance=False)[:, 1:]
+    out = {}
+    for k in ks:
+        a, b = np.sort(nx[:, :k], axis=1), np.sort(ny[:, :k], axis=1)
+        # count common ids per row: merge two sorted rows via searchsorted on offset ids
+        off = (np.arange(len(X)) * len(X))[:, None]
+        pos = np.searchsorted((b + off).ravel(), (a + off).ravel())
+        pos = np.minimum(pos, b.size - 1)
+        hit = (b + off).ravel()[pos] == (a + off).ravel()
+        out[k] = hit.reshape(a.shape).sum(axis=1) / k
+    return out
 
 
 def distance_spearman(
@@ -174,8 +211,14 @@ def evaluate(
 
     Returns ``(scalars, arrays)``: a flat dict of scalar metrics for the
     results table, and a dict of arrays (R_NX curve, per-point overlap).
+    Above ``EXACT_MAX_N`` points the rank metrics are estimated from
+    ``N_ANCHORS`` random rows (fixed seed) and recorded as ``n_anchors``.
     """
-    rm = rank_metrics(X, Y, ks=ks)
+    n = X.shape[0]
+    anchors = None
+    if n > EXACT_MAX_N:
+        anchors = np.sort(np.random.default_rng(0).choice(n, N_ANCHORS, replace=False))
+    rm = rank_metrics(X, Y, ks=ks, anchors=anchors)
     scalars: dict[str, float] = {
         "auc_rnx": rm.auc_r_nx,
         "qscore_legacy": rm.qscore_legacy,
@@ -192,7 +235,10 @@ def evaluate(
             scalars[f"rnx@{k}"] = float(rm.r_nx[k])
     if labels is not None and labels.dtype.kind in "iuUSO":
         scalars["knn_acc"] = knn_accuracy(Y, labels)
+    if anchors is not None:
+        scalars["n_anchors"] = len(anchors)
     arrays = {"r_nx": rm.r_nx}
-    for k, v in rm.pointwise_overlap.items():
+    overlap = rm.pointwise_overlap if anchors is None else knn_overlap(X, Y, [k for k in ks if k < n / 2])
+    for k, v in overlap.items():
         arrays[f"overlap@{k}"] = v
     return scalars, arrays
