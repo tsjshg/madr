@@ -54,12 +54,23 @@ def test_gradient_matches_finite_differences():
     assert np.allclose(G / len(i), num, atol=1e-6)
 
 
-def test_recovers_a_2d_layout():
+@pytest.mark.parametrize(
+    "kw, floor",
+    [
+        # Default softmax loss: on intrinsically 2-D data it levels off near
+        # R_NX@10 = 0.80 (also with 800 epochs or PCA init); see the
+        # s_curve regression in docs/scalerank.md.
+        (dict(), 0.75),
+        # Triplet configuration of the first prototype keeps its earlier level.
+        (dict(n_neg=1, per_point=32, hard=0.3), 0.85),
+    ],
+)
+def test_recovers_a_2d_layout(kw, floor):
     from drbench.metrics import rank_metrics
 
     X = np.random.default_rng(2).uniform(size=(300, 2))
-    Y = ScaleRank(gamma=1.0, init="random", n_epochs=300, random_state=0).fit_transform(X)
-    assert rank_metrics(X, Y).r_nx[10] > 0.8
+    Y = ScaleRank(gamma=1.0, init="random", n_epochs=300, random_state=0, **kw).fit_transform(X)
+    assert rank_metrics(X, Y).r_nx[10] > floor
 
 
 def test_local_scaling_rank_tables_are_permutations():
@@ -78,8 +89,66 @@ def test_frozen_out_neighbours_receive_no_gradient():
     assert np.allclose(G[4], 0) and not np.allclose(G[5], 0)
 
 
-@pytest.mark.parametrize("kw", [dict(local_scaling=10, local_scaling_kmax=30), dict(hard_one_sided=True, hard_c=1.0)])
+@pytest.mark.parametrize(
+    "kw",
+    [
+        dict(local_scaling=10, local_scaling_kmax=30),
+        dict(n_neg=1, hard=0.3, hard_one_sided=True, hard_c=1.0),
+        dict(n_neg=5, hard=0.3, hard_one_sided=True),
+    ],
+)
 def test_options_run(kw):
     X = np.random.default_rng(5).normal(size=(150, 8))
     Y = ScaleRank(n_epochs=20, random_state=0, **kw).fit_transform(X)
     assert Y.shape == (150, 2) and np.isfinite(Y).all()
+
+
+def test_softmax_with_one_negative_equals_triplet():
+    from drbench.proto.scalerank import softmax_loss_and_grad
+
+    rng = np.random.default_rng(6)
+    Y = rng.normal(size=(15, 2))
+    i, j, m = np.array([0, 1, 2, 3]), np.array([4, 5, 6, 7]), np.array([8, 9, 10, 11])
+    l1, G1 = triplet_loss_and_grad(Y, i, j, m)
+    l2, G2 = softmax_loss_and_grad(Y, i, j, m[:, None])
+    assert l1 == pytest.approx(l2)
+    assert np.allclose(G1, G2)
+
+
+def test_softmax_gradient_matches_finite_differences():
+    from drbench.proto.scalerank import softmax_loss_and_grad
+
+    rng = np.random.default_rng(7)
+    Y = rng.normal(size=(12, 2))
+    i = np.array([0, 1, 2, 3, 0])
+    j = np.array([4, 5, 6, 7, 8])
+    M = rng.integers(0, 12, size=(5, 6))
+    _, G = softmax_loss_and_grad(Y, i, j, M)
+    eps = 1e-6
+    num = np.zeros_like(Y)
+    for a in range(12):
+        for c in range(2):
+            Yp, Ym = Y.copy(), Y.copy()
+            Yp[a, c] += eps
+            Ym[a, c] -= eps
+            num[a, c] = (softmax_loss_and_grad(Yp, i, j, M)[0] - softmax_loss_and_grad(Ym, i, j, M)[0]) / (2 * eps)
+    assert np.allclose(G / len(i), num, atol=1e-6)
+
+
+def test_groups_respect_ranks():
+    from drbench.proto.scalerank import sample_groups
+
+    rng = np.random.default_rng(8)
+    X = rng.normal(size=(70, 5))
+    order, rank = neighbour_order(X)
+    low_nbrs = np.argsort(cdist(X[:, :2], X[:, :2]), axis=1)[:, 1:31]
+    for hard in (0.0, 0.5):
+        i, j, M, is_hard = sample_groups(order, scale_profile(70, 1.0), 20, rng, 8, rank, low_nbrs, hard)
+        assert M.shape == (70 * 20, 8)
+        assert (rank[i[:, None], M] > rank[i, j][:, None]).all()
+        assert (M != i[:, None]).all()
+
+
+def test_hard_c_requires_triplets():
+    with pytest.raises(ValueError):
+        ScaleRank(n_neg=20, hard_c=1.0)

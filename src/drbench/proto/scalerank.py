@@ -7,9 +7,14 @@ Objective (see docs/scalerank.md)::
 where A_K(i) is the probability that a true K-neighbour j of i is embedded
 closer than a non-neighbour m, and p(K) is the scale profile.  It is
 optimised stochastically: draw K ~ p, j from the top-K of i in the original
-space, m from outside it, and apply the smooth triplet loss
+space and Q non-neighbours m_1..m_Q from outside it, and apply
 
-    l(i, j, m) = softplus(log(1 + d_ij^2) - log(1 + d_im^2)).
+    l(i, j, m_1..m_Q) = -log(q_ij / (q_ij + sum_m q_im)),  q = 1 / (1 + d^2).
+
+The default is Q = n_neg = 20: negatives that currently sit close to i get
+most of the push, which replaced explicit hard-negative sampling.  With
+n_neg=1 this is the triplet loss softplus(log(1 + d_ij^2) - log(1 + d_im^2))
+of the first prototype (that version also used per_point=32, hard=0.3).
 """
 
 from __future__ import annotations
@@ -148,6 +153,73 @@ def triplet_loss_and_grad(Y: np.ndarray, i, j, m, w=None, freeze_m=None) -> tupl
     return float(loss.mean()), G
 
 
+def sample_groups(
+    order: np.ndarray,
+    p: np.ndarray,
+    per_point: int,
+    rng: np.random.Generator,
+    n_neg: int,
+    rank: np.ndarray | None = None,
+    low_nbrs: np.ndarray | None = None,
+    hard: float = 0.0,
+):
+    """Anchors i, one in-neighbour j each, and ``n_neg`` out-neighbours per anchor.
+
+    Same draws as :func:`sample_triplets` (K ~ p, j from the top-K, negatives
+    uniform from outside it, drawn with replacement), but every group shares
+    one (i, K, j) and has ``n_neg`` negatives, returned as an (n, n_neg)
+    array.  Hard negatives, if requested, replace each column independently.
+    """
+    n = order.shape[0]
+    i = np.repeat(np.arange(n), per_point)
+    K = rng.choice(np.arange(1, n - 1), size=i.size, p=p)
+    j = order[i, (rng.random(i.size) * K).astype(np.int64)]
+    pos = K[:, None] + (rng.random((i.size, n_neg)) * (n - 1 - K)[:, None]).astype(np.int64)
+    M = order[i[:, None], pos]
+    is_hard = np.zeros(M.shape, dtype=bool)
+    if hard > 0 and low_nbrs is not None:
+        width = np.minimum(2 * K, low_nbrs.shape[1])[:, None]
+        cand = low_nbrs[i[:, None], (rng.random(M.shape) * width).astype(np.int64)]
+        is_hard = (rng.random(M.shape) < hard) & (2 * K <= low_nbrs.shape[1])[:, None] & (rank[i[:, None], cand] > K[:, None])
+        M = np.where(is_hard, cand, M)
+    return i, j, M, is_hard
+
+
+def softmax_loss_and_grad(Y: np.ndarray, i, j, M, freeze_m=None) -> tuple[float, np.ndarray]:
+    """InfoNCE-style loss: -log(q_ij / (q_ij + sum_m q_im)), q = 1 / (1 + d^2).
+
+    With one negative per group this is exactly the triplet loss.  With many,
+    each negative's push is weighted by its share q_im / Z of the softmax, so
+    negatives that currently sit close to i dominate: a smooth version of
+    hard-negative sampling.  Returns the mean loss and the gradient w.r.t. Y
+    summed per point.
+    """
+    dij = Y[i] - Y[j]  # (n, d)
+    dim = Y[i][:, None, :] - Y[M]  # (n, Q, d)
+    qij = 1.0 / (1.0 + (dij**2).sum(axis=1))  # (n,)
+    qim = 1.0 / (1.0 + (dim**2).sum(axis=2))  # (n, Q)
+    Z = qij + qim.sum(axis=1)
+    loss = np.log(Z) - np.log(qij)
+    # d loss / d log q_ij = -(1 - q_ij / Z);  d loss / d log q_im = q_im / Z
+    # d log q / d y_i = -2 (y_i - y_other) q
+    gij = (2 * (1 - qij / Z) * qij)[:, None] * dij  # d loss / d y_i through d_ij
+    gim = (-2 * (qim / Z[:, None]) * qim)[:, :, None] * dim  # d loss / d y_i through each d_im
+    if freeze_m is not None:
+        gim_m = np.where(freeze_m[:, :, None], 0.0, gim)
+    else:
+        gim_m = gim
+    n, dim_out = Y.shape
+    G = np.zeros_like(Y)
+    Mf = M.ravel()
+    for c in range(dim_out):
+        G[:, c] = (
+            np.bincount(i, weights=gij[:, c] + gim[:, :, c].sum(axis=1), minlength=n)
+            - np.bincount(j, weights=gij[:, c], minlength=n)
+            - np.bincount(Mf, weights=gim_m[:, :, c].ravel(), minlength=n)
+        )
+    return float(loss.mean()), G
+
+
 class ScaleRank:
     def __init__(
         self,
@@ -156,11 +228,11 @@ class ScaleRank:
         width: float = 1.0,
         n_components: int = 2,
         n_epochs: int = 800,
-        per_point: int = 32,
+        per_point: int = 8,
         lr: float = 1.0,
         init: str = "pca",
         init_scale: float = 1.0,
-        hard: float = 0.3,
+        hard: float = 0.0,
         hard_k: int = 128,
         refresh_every: int = 5,
         hard_pos: int = 1,
@@ -169,6 +241,7 @@ class ScaleRank:
         hard_one_sided: bool = False,
         local_scaling: int | None = None,
         local_scaling_kmax: int | None = None,
+        n_neg: int = 20,
         optimizer: str = "adam",
         snapshot_every: int = 0,
         random_state: int | None = None,
@@ -185,6 +258,13 @@ class ScaleRank:
         self.hard_pos, self.hard_decay, self.hard_c = hard_pos, hard_decay, hard_c
         self.hard_one_sided = hard_one_sided
         self.local_scaling, self.local_scaling_kmax = local_scaling, local_scaling_kmax
+        if n_neg < 1:
+            raise ValueError("n_neg must be >= 1")
+        if n_neg > 1 and (hard_pos > 1 or hard_c is not None):
+            raise ValueError("hard_pos and hard_c are only implemented for triplets (n_neg=1)")
+        # n_neg=1: triplets (the original path); n_neg>1: one positive against
+        # n_neg negatives with a softmax (InfoNCE) loss.
+        self.n_neg = n_neg
         self.snapshot_every = snapshot_every
         self.random_state = random_state
         self.verbose = verbose
@@ -235,12 +315,20 @@ class ScaleRank:
             if self.hard > 0 and (t - 1) % self.refresh_every == 0:
                 low_nbrs = NearestNeighbors(n_neighbors=hard_k + 1).fit(Y).kneighbors(Y, return_distance=False)[:, 1:]
             hard = self.hard * (1 - (t - 1) / self.n_epochs) if self.hard_decay else self.hard
-            parts = [
-                sample_triplets(order, pk, cnt, rng, rank, low_nbrs, hard, Y, self.hard_pos, self.hard_c)
-                for order, rank, pk, cnt in tables
-            ]
-            i, j, m, w, is_hard = (np.concatenate(a) for a in zip(*parts))
-            loss, G = triplet_loss_and_grad(Y, i, j, m, w, is_hard if self.hard_one_sided else None)
+            if self.n_neg == 1:
+                parts = [
+                    sample_triplets(order, pk, cnt, rng, rank, low_nbrs, hard, Y, self.hard_pos, self.hard_c)
+                    for order, rank, pk, cnt in tables
+                ]
+                i, j, m, w, is_hard = (np.concatenate(a) for a in zip(*parts))
+                loss, G = triplet_loss_and_grad(Y, i, j, m, w, is_hard if self.hard_one_sided else None)
+            else:
+                parts = [
+                    sample_groups(order, pk, cnt, rng, self.n_neg, rank, low_nbrs, hard)
+                    for order, rank, pk, cnt in tables
+                ]
+                i, j, M, is_hard = (np.concatenate(a) for a in zip(*parts))
+                loss, G = softmax_loss_and_grad(Y, i, j, M, is_hard if self.hard_one_sided else None)
             G /= self.per_point
             step = self.lr * (1 - (t - 1) / self.n_epochs)
             mom = b1 * mom + (1 - b1) * G

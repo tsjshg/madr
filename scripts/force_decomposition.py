@@ -13,6 +13,10 @@ This is how the anti-hub mechanism behind ScaleRank's outliers was found
 hard-negative push of other points, and are left behind as cluster cores
 contract.
 
+The decomposition is written for the triplet loss, so it runs the triplet
+configuration of the first prototype (n_neg=1, per_point=32, hard=0.3)
+unless --params overrides those; n_neg > 1 is rejected.
+
     uv run python scripts/force_decomposition.py hier_blobs --epochs 100 300 500 700
     uv run python scripts/force_decomposition.py hier_blobs --params hard=0.0
 """
@@ -62,7 +66,7 @@ def force_terms(Y, order, rank, p, per_point, hard, hard_k, rng):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dataset", help="needs categorical labels (cluster centres)")
-    ap.add_argument("--params", default="gamma=1.0", help="ScaleRank kwargs, e.g. gamma=1.0,hard=0.3")
+    ap.add_argument("--params", default="gamma=1.0", help="ScaleRank kwargs, e.g. gamma=1.0,hard=0.0")
     ap.add_argument("--epochs", nargs="+", type=int, default=[100, 300, 500, 700])
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -70,7 +74,10 @@ def main():
     ds = datasets.load(args.dataset)
     if ds.labels is None:
         raise SystemExit(f"{ds.name} has no categorical labels")
-    _, kw = parse_spec(f"x:{args.params}")
+    _, given = parse_spec(f"x:{args.params}")
+    kw = {"n_neg": 1, "per_point": 32, "hard": 0.3, **given}
+    if kw["n_neg"] != 1:
+        raise SystemExit("force decomposition is only implemented for the triplet loss (n_neg=1)")
     model = ScaleRank(random_state=args.seed, snapshot_every=50, **kw)
     Y_final = model.fit_transform(ds.X)
     r = local_radius(Y_final, 10)

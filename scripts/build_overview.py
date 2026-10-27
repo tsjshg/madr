@@ -23,6 +23,19 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = ["pca", "mds", "tsne", "umap", "densmap", "pacmap", "trimap"]
 SR = ["scalerank:gamma=1.0", "scalerank:gamma=0.5", "scalerank:gamma=0.0"]
 VARIANT_R = "scalerank:gamma=1.0,local_scaling=10,local_scaling_kmax=30,hard=0.15"
+# The page describes the first prototype (triplets + hard negatives).  Its
+# results are cached under explicit names since the defaults changed to the
+# softmax loss; the page keeps the short names as keys.
+FIRST = {"hard": "0.3", "n_neg": "1", "per_point": "32"}
+
+
+def cached(spec):
+    if not spec.startswith("scalerank:"):
+        return spec
+    given = {kv.split("=")[0] for kv in spec.split(":", 1)[1].split(",")}
+    return spec + "".join(f",{k}={v}" for k, v in FIRST.items() if k not in given)
+
+
 ORDER = ["s_curve", "hier_blobs", "density_blobs", "digits", "pollen", "usoskin", "kolodziejczyk", "buettner"]
 METRICS = ["rnx@10", "auc_rnx", "trust@10", "dist_spearman", "density_corr", "knn_acc", "time_s"]
 
@@ -48,7 +61,7 @@ def main():
     for ds in ORDER:
         summary[ds] = {}
         for m in BASE + SR + ["random"]:
-            r = table[(table.dataset == ds) & (table.method == m)]
+            r = table[(table.dataset == ds) & (table.method == cached(m))]
             if r.empty:
                 continue
             r = r.iloc[0]
@@ -60,7 +73,7 @@ def main():
         grid = np.unique(np.round(np.geomspace(1, n - 2, 70)).astype(int))
         curves[ds] = {}
         for m in BASE + ["scalerank:gamma=1.0", "scalerank:gamma=0.0"]:
-            r = np.load(_paths(ds, m, 0)["curves"])["r_nx"]
+            r = np.load(_paths(ds, cached(m), 0)["curves"])["r_nx"]
             curves[ds][m] = {"k": grid.tolist(), "r": [round(float(r[k]), 4) for k in grid]}
 
     digits = datasets.load("digits")
@@ -69,13 +82,15 @@ def main():
     emb = {
         "digits": {
             "labels": digits.labels.tolist(),
-            "emb": {m: unit_square(np.load(_paths("digits", m, 0)["emb"])) for m in ["mds", "tsne", "scalerank:gamma=1.0"]},
+            "emb": {m: unit_square(np.load(_paths("digits", cached(m), 0)["emb"])) for m in ["mds", "tsne", "scalerank:gamma=1.0"]},
         },
         "hier_blobs": {
             "labels": hier.labels_coarse.tolist(),
             "antihub": (k_occurrence(hier.X) <= 2).astype(int).tolist(),
-            "emb": {m: unit_square(np.load(_paths("hier_blobs", m, 0)["emb"])) for m in hier_methods},
-            "outlier": {m: outlier_mask(np.load(_paths("hier_blobs", m, 0)["emb"])).astype(int).tolist() for m in hier_methods},
+            "emb": {m: unit_square(np.load(_paths("hier_blobs", cached(m), 0)["emb"])) for m in hier_methods},
+            "outlier": {
+                m: outlier_mask(np.load(_paths("hier_blobs", cached(m), 0)["emb"])).astype(int).tolist() for m in hier_methods
+            },
         },
     }
 
@@ -83,7 +98,7 @@ def main():
     for ds in ORDER:
         outfrac[ds] = {}
         for m in ["scalerank:gamma=1.0", "tsne", VARIANT_R]:
-            fr = [outlier_mask(np.load(p)).mean() for s in (0, 1, 2) if (p := _paths(ds, m, s)["emb"]).exists()]
+            fr = [outlier_mask(np.load(p)).mean() for s in (0, 1, 2) if (p := _paths(ds, cached(m), s)["emb"]).exists()]
             outfrac[ds][m] = round(float(np.mean(fr)), 4) if fr else None
 
     data = {"summary": summary, "curves": curves, "emb": emb, "outfrac": outfrac}
