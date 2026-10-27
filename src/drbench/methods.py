@@ -135,3 +135,11 @@ def scalerank_fast(X, seed=0, **kw):
     from .proto.scalerank_fast import ScaleRankFast
 
     return ScaleRankFast(random_state=seed, **kw).fit_transform(X)
+
+
+@register("scalerank_rs")
+def scalerank_rs(X, seed=0, **kw):
+    """Rust port of ScaleRankFast (scalerank-web's scalerank-core, via the scalerank_rs bindings)."""
+    import scalerank_rs
+
+    return scalerank_rs.ScaleRankFast(random_state=seed, **kw).fit_transform(np.ascontiguousarray(X, dtype=np.float64))
