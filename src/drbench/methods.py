@@ -143,3 +143,19 @@ def scalerank_rs(X, seed=0, **kw):
     import scalerank_rs
 
     return scalerank_rs.ScaleRankFast(random_state=seed, **kw).fit_transform(np.ascontiguousarray(X, dtype=np.float64))
+
+
+@register("umap_rs")
+def umap_rs(X, seed=0, **kw):
+    """Rust UMAP from scalerank-web (umap-learn's defaults, PCA initialisation)."""
+    import scalerank_rs
+
+    return scalerank_rs.umap(np.ascontiguousarray(X, dtype=np.float64), random_state=seed, **kw)
+
+
+@register("tsne_rs")
+def tsne_rs(X, seed=0, **kw):
+    """Rust t-SNE from scalerank-web (openTSNE's defaults, Barnes-Hut)."""
+    import scalerank_rs
+
+    return scalerank_rs.tsne(np.ascontiguousarray(X, dtype=np.float64), random_state=seed, **kw)
